@@ -182,6 +182,7 @@ export function ScheduleView({
     profile,
     user,
     workspaceAccessToken,
+    hasWorkspaceScope,
     connectGoogleWorkspace,
     clearWorkspaceToken,
     platformNotices,
@@ -378,19 +379,19 @@ export function ScheduleView({
     setWorkspaceFeedback(null);
     setWorkspaceBusy(true);
     try {
-      const token = await connectGoogleWorkspace();
+      const token = await connectGoogleWorkspace(['calendar']);
       if (token) {
         await loadCalendarEvents(token);
         setWorkspaceFeedback({
           type: 'success',
-          message: 'Google Calendar e Gmail conectados! Agora você pode agendar alertas ou enviar e-mails.',
+          message: 'Google Calendar conectado! Você pode agendar alertas ou autorizar o Gmail ao enviar por e-mail.',
         });
       }
       return token;
     } catch (err) {
       setWorkspaceFeedback({
         type: 'error',
-        message: err instanceof Error ? err.message : 'Não foi possível conectar ao Google Calendar e Gmail.',
+        message: err instanceof Error ? err.message : 'Não foi possível conectar ao Google Calendar.',
       });
       return null;
     } finally {
@@ -405,7 +406,12 @@ export function ScheduleView({
     setWorkspaceFeedback(null);
 
     try {
-      const token = workspaceAccessToken || (await connectGoogleWorkspace());
+      const requiredScope = action.kind === 'send_gmail' ? 'gmail' : 'calendar';
+      const hasRequired = hasWorkspaceScope ? hasWorkspaceScope(requiredScope) : true;
+      const token =
+        workspaceAccessToken && hasRequired
+          ? workspaceAccessToken
+          : await connectGoogleWorkspace([requiredScope]);
       if (!token) {
         throw new Error('Conecte sua conta Google para concluir esta ação.');
       }

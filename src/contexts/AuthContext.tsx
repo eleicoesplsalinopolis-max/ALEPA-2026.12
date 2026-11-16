@@ -3,6 +3,7 @@ import {
   GoogleAuthProvider,
   User,
   createUserWithEmailAndPassword,
+  deleteUser,
   linkWithPopup,
   onAuthStateChanged,
   reauthenticateWithPopup,
@@ -13,23 +14,32 @@ import {
   updateProfile,
 } from 'firebase/auth';
 import {
+  CollectionReference,
+  Query,
   collection,
   deleteDoc,
   deleteField,
   doc,
   getDoc,
+  getDocs,
   limit,
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
+import { PRIVACY_VERSION } from '../components/PrivacyView';
+import { mergeById } from '../lib/readingMerge';
 import {
   OperationType,
   FIREBASE_STORAGE_BUCKET,
+  WORKSPACE_SCOPES,
+  type WorkspaceScopeKey,
   auth,
   db,
   googleAuthProvider,
@@ -37,7 +47,6 @@ import {
   isAdminEmail,
   testFirestoreConnection,
   toFamilyMemberDocId,
-  workspaceAuthProvider,
 } from '../lib/firebase';
 import { ALEPA_DISCIPLINES, CONCURSO_PROFILE } from '../data/alepaSyllabus';
 import { getMedioDisciplines } from '../data/alepaMedioSyllabus';
@@ -143,7 +152,8 @@ interface AuthContextValue {
   syncError: string | null;
   clearSyncError: () => void;
   workspaceAccessToken: string | null;
-  connectGoogleWorkspace: () => Promise<string | null>;
+  hasWorkspaceScope?: (scope: WorkspaceScopeKey) => boolean;
+  connectGoogleWorkspace: (scopes?: WorkspaceScopeKey[]) => Promise<string | null>;
   clearWorkspaceToken: () => void;
   effectiveRole: NormalizedUserRole;
   isAdmin: boolean;
@@ -214,14 +224,26 @@ interface AuthContextValue {
   storageMetadataRecords: StorageMetadataRecord[];
   auditLogs: AuditLogEntry[];
   getCampusDisciplines: (campus: CampusLevel, medioCargoGroup?: MedioCargoGroup) => Discipline[];
-  loginWithEmail: (email: string, password: string) => Promise<void>;
-  registerWithEmail: (email: string, password: string, displayName: string, preferredRole: UserRole) => Promise<void>;
-  loginWithGoogle: () => Promise<void>;
+  loginWithEmail: (
+    email: string,
+    password: string,
+    privacyAcceptance?: { acceptedAt: string; version: string }
+  ) => Promise<void>;
+  registerWithEmail: (
+    email: string,
+    password: string,
+    displayName: string,
+    preferredRole: UserRole,
+    privacyAcceptance?: { acceptedAt: string; version: string }
+  ) => Promise<void>;
+  loginWithGoogle: (privacyAcceptance?: { acceptedAt: string; version: string }) => Promise<void>;
   enterGuestMode: (guestName?: string) => void;
   exitGuestMode: () => void;
   resendVerification: () => Promise<void>;
   refreshAuthState: () => Promise<void>;
   logout: () => Promise<void>;
+  exportMyData: () => Promise<void>;
+  deleteMyAccount: () => Promise<void>;
   updateProfileSettings: (patch: {
     displayName?: string;
     dailyGoalMinutes?: number;
@@ -242,7 +264,8 @@ interface AuthContextValue {
   ) => Promise<void>;
   saveReadingProgress: (
     materialId: string,
-    patch: Partial<Omit<ReadingProgress, 'materialId' | 'userId' | 'updatedAt'>>
+    patch: Partial<Omit<ReadingProgress, 'materialId' | 'userId' | 'updatedAt'>>,
+    removedIds?: { bookmarks?: string[]; highlights?: string[]; annotations?: string[] }
   ) => Promise<void>;
   deleteReadingProgress: (materialId: string) => Promise<void>;
   saveMediaProgress: (
@@ -563,7 +586,52 @@ const GUEST_MODE_KEY = 'concurso_alepa_guest_mode';
 const GUEST_DATA_KEY = 'concurso_alepa_guest_data_v1';
 const LOCAL_PREFS_KEY = 'concurso_alepa_preferences_v1';
 const DEVICE_ID_KEY = 'concurso_alepa_device_id_v1';
+const PENDING_PRIVACY_KEY = 'alepa_pending_privacy_accept';
 const GUEST_UID = 'guest_local';
+const USER_SUBCOLLECTIONS = [
+  'topicProgress',
+  'studySessions',
+  'simuladoAttempts',
+  'errorNotebook',
+  'disciplineGoals',
+  'readingProgress',
+  'mediaProgress',
+  'notifications',
+] as const;
+
+function savePendingPrivacyAcceptance(acceptance?: { acceptedAt: string; version: string }): void {
+  if (!acceptance) return;
+  try {
+    sessionStorage.setItem(PENDING_PRIVACY_KEY, JSON.stringify(acceptance));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function consumePendingPrivacyAcceptance(): { acceptedAt: string; version: string } | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_PRIVACY_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { acceptedAt?: string; version?: string };
+    if (typeof parsed.acceptedAt === 'string' && typeof parsed.version === 'string') {
+      return {
+        acceptedAt: parsed.acceptedAt.slice(0, 40),
+        version: parsed.version.slice(0, 32),
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingPrivacyAcceptance(): void {
+  try {
+    sessionStorage.removeItem(PENDING_PRIVACY_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 function loadCachedPreferences(): StudentPreferences {
   try {
@@ -701,6 +769,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [syncError, setSyncError] = useState<string | null>(null);
   // In-memory only (never localStorage/sessionStorage) per Workspace security rules
   const [workspaceAccessToken, setWorkspaceAccessToken] = useState<string | null>(null);
+  const [workspaceGrantedScopes, setWorkspaceGrantedScopes] = useState<WorkspaceScopeKey[]>([]);
 
   const [topicProgressMap, setTopicProgressMap] = useState<Record<string, TopicProgress>>({});
   const [disciplineGoalsMap, setDisciplineGoalsMap] = useState<Record<string, DisciplineWeeklyGoal>>({});
@@ -925,6 +994,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const isPrimaryAdminAccount =
           Boolean(firebaseUser.emailVerified) && isAdminEmail(firebaseUser.email);
         const cleanEmail = (firebaseUser.email || '').trim().toLowerCase().slice(0, 160);
+        const pendingPrivacy = consumePendingPrivacyAcceptance();
         if (!snap.exists()) {
           const newProfile: Record<string, unknown> = {
             uid: firebaseUser.uid,
@@ -933,12 +1003,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             dailyGoalMinutes: CONCURSO_PROFILE.dailyGoalMinutes,
             examDate: CONCURSO_PROFILE.examDate,
             targetCargo: 'Cargo 03 – Técnico Legislativo (PL.AL.102)',
+            ...(pendingPrivacy
+              ? {
+                  privacyAcceptedAt: pendingPrivacy.acceptedAt,
+                  privacyVersion: pendingPrivacy.version,
+                }
+              : {}),
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           };
           if (cleanEmail) newProfile.email = cleanEmail;
           try {
             await setDoc(userRef, newProfile);
+            if (pendingPrivacy) clearPendingPrivacyAcceptance();
           } catch (writeErr) {
             console.warn('Offline write skipped for new profile:', writeErr);
           }
@@ -951,10 +1028,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (cleanEmail && !existingData.email) {
             updates.email = cleanEmail;
           }
+          if (pendingPrivacy && (!existingData.privacyAcceptedAt || existingData.privacyVersion !== pendingPrivacy.version)) {
+            updates.privacyAcceptedAt = pendingPrivacy.acceptedAt;
+            updates.privacyVersion = pendingPrivacy.version;
+          }
           if (Object.keys(updates).length > 0) {
             updates.updatedAt = serverTimestamp();
             try {
               await updateDoc(userRef, updates);
+              if (pendingPrivacy) clearPendingPrivacyAcceptance();
             } catch (updateErr) {
               console.warn('Offline update skipped for profile updates:', updateErr);
             }
@@ -1895,13 +1977,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [managedDisciplines, managedTopics]
   );
 
-  const loginWithEmail = async (email: string, password: string) => {
+  const loginWithEmail = async (
+    email: string,
+    password: string,
+    privacyAcceptance?: { acceptedAt: string; version: string }
+  ) => {
     setIsGuest(false);
     try {
       localStorage.removeItem(GUEST_MODE_KEY);
     } catch {
       // ignore
     }
+    savePendingPrivacyAcceptance(privacyAcceptance);
     await signInWithEmailAndPassword(auth, email.trim(), password);
   };
 
@@ -1909,7 +1996,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     email: string,
     password: string,
     displayName: string,
-    _preferredRole: UserRole
+    _preferredRole: UserRole,
+    privacyAcceptance?: { acceptedAt: string; version: string }
   ) => {
     setIsGuest(false);
     try {
@@ -1918,6 +2006,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // ignore
     }
     const cleanName = displayName.trim().slice(0, 120);
+    const acceptData = privacyAcceptance || {
+      acceptedAt: new Date().toISOString().slice(0, 40),
+      version: PRIVACY_VERSION,
+    };
+    savePendingPrivacyAcceptance(acceptData);
     const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
     await updateProfile(cred.user, { displayName: cleanName });
     try {
@@ -1927,13 +2020,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await setDoc(userRef, {
           uid: cred.user.uid,
           displayName: cleanName || cred.user.email?.split('@')[0] || 'Estudante ALEPA',
+          email: (cred.user.email || email).trim().toLowerCase().slice(0, 160),
           role: 'student',
           dailyGoalMinutes: CONCURSO_PROFILE.dailyGoalMinutes,
           examDate: CONCURSO_PROFILE.examDate,
           targetCargo: 'Cargo 03 – Técnico Legislativo (PL.AL.102)',
+          privacyAcceptedAt: acceptData.acceptedAt.slice(0, 40),
+          privacyVersion: acceptData.version.slice(0, 32),
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
+        clearPendingPrivacyAcceptance();
       }
     } catch (err) {
       console.error('Erro ao criar perfil inicial:', err);
@@ -1942,13 +2039,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     void sendEmailVerification(cred.user).catch(() => {});
   };
 
-  const loginWithGoogle = async () => {
+  const loginWithGoogle = async (privacyAcceptance?: { acceptedAt: string; version: string }) => {
     setIsGuest(false);
     try {
       localStorage.removeItem(GUEST_MODE_KEY);
     } catch {
       // ignore
     }
+    savePendingPrivacyAcceptance(privacyAcceptance);
     const result = await signInWithPopup(auth, googleAuthProvider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (credential?.accessToken) {
@@ -1988,44 +2086,60 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsGuest(false);
   };
 
-  const connectGoogleWorkspace = async (): Promise<string | null> => {
+  const hasWorkspaceScope = useCallback(
+    (scope: WorkspaceScopeKey) => workspaceGrantedScopes.includes(scope),
+    [workspaceGrantedScopes]
+  );
+
+  const connectGoogleWorkspace = async (
+    scopes: WorkspaceScopeKey[] = ['drive']
+  ): Promise<string | null> => {
+    const requestedKeys: WorkspaceScopeKey[] = Array.from(
+      new Set<WorkspaceScopeKey>(scopes.length > 0 ? scopes : ['drive'])
+    );
+    const provider = new GoogleAuthProvider();
+    requestedKeys.forEach((key) => {
+      WORKSPACE_SCOPES[key].forEach((scopeUrl) => provider.addScope(scopeUrl));
+    });
+    provider.setCustomParameters({
+      prompt: 'consent select_account',
+      include_granted_scopes: 'true',
+    });
+
     const current = auth.currentUser;
     const hasGoogleLinked = current?.providerData.some((p) => p.providerId === 'google.com');
 
-    workspaceAuthProvider.setCustomParameters({ prompt: 'consent select_account' });
-    try {
-      let result;
-      if (current && hasGoogleLinked) {
-        result = await reauthenticateWithPopup(current, workspaceAuthProvider);
-      } else if (current) {
-        try {
-          result = await linkWithPopup(current, workspaceAuthProvider);
-        } catch (linkErr: unknown) {
-          const code = (linkErr as { code?: string })?.code || '';
-          if (code === 'auth/credential-already-in-use' || code === 'auth/provider-already-linked') {
-            result = await signInWithPopup(auth, workspaceAuthProvider);
-          } else {
-            throw linkErr;
-          }
+    let result;
+    if (current && hasGoogleLinked) {
+      result = await reauthenticateWithPopup(current, provider);
+    } else if (current) {
+      try {
+        result = await linkWithPopup(current, provider);
+      } catch (linkErr: unknown) {
+        const code = (linkErr as { code?: string })?.code || '';
+        if (code === 'auth/credential-already-in-use' || code === 'auth/provider-already-linked') {
+          result = await signInWithPopup(auth, provider);
+        } else {
+          throw linkErr;
         }
-      } else {
-        result = await signInWithPopup(auth, workspaceAuthProvider);
       }
-
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      const token = credential?.accessToken || null;
-      if (!token) {
-        throw new Error('Não foi possível obter a autorização da sua conta Google Workspace.');
-      }
-      setWorkspaceAccessToken(token);
-      return token;
-    } finally {
-      workspaceAuthProvider.setCustomParameters({});
+    } else {
+      result = await signInWithPopup(auth, provider);
     }
+
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    const token = credential?.accessToken || null;
+    if (!token) {
+      throw new Error('Não foi possível obter a autorização da sua conta Google Workspace.');
+    }
+    setWorkspaceAccessToken(token);
+    setWorkspaceGrantedScopes((prev) => Array.from(new Set<WorkspaceScopeKey>([...prev, ...requestedKeys])));
+    return token;
   };
 
   const clearWorkspaceToken = () => {
     setWorkspaceAccessToken(null);
+    setWorkspaceGrantedScopes([]);
   };
 
   const resendVerification = async () => {
@@ -2088,6 +2202,134 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await syncAccessPresence(false);
     }
     await signOut(auth);
+  };
+
+  const wipeCollection = async (ref: Query | CollectionReference, pathLabel: string) => {
+    try {
+      const snap = await getDocs(ref);
+      for (let i = 0; i < snap.docs.length; i += 400) {
+        const batch = writeBatch(db);
+        snap.docs.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, pathLabel);
+    }
+  };
+
+  const exportMyData = async () => {
+    const u = auth.currentUser;
+    let payload: Record<string, unknown>;
+    if (!u) {
+      payload = {
+        exportedAt: new Date().toISOString(),
+        mode: 'guest_local',
+        data: loadGuestStore(),
+      };
+    } else {
+      let profileData: unknown = null;
+      try {
+        const userSnap = await getDoc(doc(db, 'users', u.uid));
+        profileData = userSnap.exists() ? userSnap.data() : profile;
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, `users/${u.uid}`);
+      }
+      const subcollections: Record<string, unknown[]> = {};
+      for (const sub of USER_SUBCOLLECTIONS) {
+        try {
+          const snap = await getDocs(collection(db, 'users', u.uid, sub));
+          subcollections[sub] = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        } catch (err) {
+          handleFirestoreError(err, OperationType.LIST, `users/${u.uid}/${sub}`);
+        }
+      }
+      let sessionsData: unknown[] = [];
+      try {
+        const sessSnap = await getDocs(
+          query(collection(db, 'accessSessions'), where('userId', '==', u.uid))
+        );
+        sessionsData = sessSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, 'accessSessions');
+      }
+      payload = {
+        exportedAt: new Date().toISOString(),
+        uid: u.uid,
+        email: u.email || null,
+        profile: profileData,
+        subcollections,
+        accessSessions: sessionsData,
+      };
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `meu-campus-alepa-dados-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const deleteMyAccount = async () => {
+    const u = auth.currentUser;
+    if (!u) {
+      try {
+        localStorage.removeItem(GUEST_DATA_KEY);
+        localStorage.removeItem(GUEST_MODE_KEY);
+        localStorage.removeItem(LOCAL_PREFS_KEY);
+      } catch {
+        // ignore storage errors
+      }
+      setIsGuest(false);
+      setProfile(null);
+      return;
+    }
+
+    for (const sub of USER_SUBCOLLECTIONS) {
+      await wipeCollection(collection(db, 'users', u.uid, sub), `users/${u.uid}/${sub}`);
+    }
+    await wipeCollection(
+      query(collection(db, 'accessSessions'), where('userId', '==', u.uid)),
+      'accessSessions'
+    );
+    try {
+      await deleteDoc(doc(db, 'users', u.uid));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `users/${u.uid}`);
+    }
+
+    try {
+      await deleteUser(u);
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/requires-recent-login') {
+        const hasGoogle = u.providerData.some((p) => p.providerId === 'google.com');
+        if (hasGoogle) {
+          await reauthenticateWithPopup(u, googleAuthProvider);
+          await deleteUser(u);
+        } else {
+          throw new Error(
+            'Por segurança, faça login novamente com seu e-mail e senha para concluir a exclusão da conta.'
+          );
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    setWorkspaceAccessToken(null);
+    setWorkspaceGrantedScopes([]);
+    try {
+      localStorage.removeItem(GUEST_DATA_KEY);
+      localStorage.removeItem(GUEST_MODE_KEY);
+      localStorage.removeItem(LOCAL_PREFS_KEY);
+      localStorage.removeItem(`alepa_guest_imported_${u.uid}`);
+    } catch {
+      // ignore storage errors
+    }
   };
 
   const updateProfileSettings = async (patch: {
@@ -2253,7 +2495,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const saveReadingProgress = async (
     materialId: string,
-    patch: Partial<Omit<ReadingProgress, 'materialId' | 'userId' | 'updatedAt'>>
+    patch: Partial<Omit<ReadingProgress, 'materialId' | 'userId' | 'updatedAt'>>,
+    removedIds?: { bookmarks?: string[]; highlights?: string[]; annotations?: string[] }
   ) => {
     const safeMaterialId = sanitizeId(materialId);
     const existing = readingProgressMap[safeMaterialId];
@@ -2270,9 +2513,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const maxWidthCh = Math.max(40, Math.min(110, Math.round(patch.maxWidthCh ?? existing?.maxWidthCh ?? 68)));
     const theme = patch.theme ?? existing?.theme ?? 'paper';
     const materialTitle = (patch.materialTitle ?? existing?.materialTitle ?? 'Documento PDF').trim().slice(0, 200) || 'Documento PDF';
-    const bookmarks = (patch.bookmarks ?? existing?.bookmarks ?? []).slice(0, 100);
-    const highlights = (patch.highlights ?? existing?.highlights ?? []).slice(0, 150);
-    const annotations = (patch.annotations ?? existing?.annotations ?? []).slice(0, 150);
+    const localBookmarks = patch.bookmarks ?? existing?.bookmarks ?? [];
+    const localHighlights = patch.highlights ?? existing?.highlights ?? [];
+    const localAnnotations = patch.annotations ?? existing?.annotations ?? [];
+    const bookmarks = mergeById([], localBookmarks, removedIds?.bookmarks ?? [], 100);
+    const highlights = mergeById([], localHighlights, removedIds?.highlights ?? [], 150);
+    const annotations = mergeById([], localAnnotations, removedIds?.annotations ?? [], 150);
     const lastReadAt = (patch.lastReadAt ?? new Date().toISOString()).slice(0, 40);
 
     if (isGuest && !auth.currentUser) {
@@ -2306,31 +2552,53 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const path = `users/${current.uid}/readingProgress/${safeMaterialId}`;
     try {
       const ref = doc(db, 'users', current.uid, 'readingProgress', safeMaterialId);
-      const docPayload = {
-        materialTitle,
-        lastPage,
-        totalPages,
-        progressPercent,
-        readingMode,
-        fontSize,
-        lineHeight,
-        maxWidthCh,
-        theme,
-        bookmarks,
-        highlights,
-        annotations,
-        lastReadAt,
-        updatedAt: serverTimestamp(),
-      };
-      if (existing) {
-        await updateDoc(ref, docPayload);
-      } else {
-        await setDoc(ref, {
-          userId: current.uid,
-          materialId: safeMaterialId,
-          ...docPayload,
-        });
-      }
+      await runTransaction(db, async (tx) => {
+        const serverSnap = await tx.get(ref);
+        const serverData = serverSnap.exists() ? (serverSnap.data() as Partial<ReadingProgress>) : null;
+        const mergedBookmarks = mergeById(
+          serverData?.bookmarks || [],
+          localBookmarks,
+          removedIds?.bookmarks ?? [],
+          100
+        );
+        const mergedHighlights = mergeById(
+          serverData?.highlights || [],
+          localHighlights,
+          removedIds?.highlights ?? [],
+          150
+        );
+        const mergedAnnotations = mergeById(
+          serverData?.annotations || [],
+          localAnnotations,
+          removedIds?.annotations ?? [],
+          150
+        );
+        const docPayload = {
+          materialTitle,
+          lastPage,
+          totalPages,
+          progressPercent,
+          readingMode,
+          fontSize,
+          lineHeight,
+          maxWidthCh,
+          theme,
+          bookmarks: mergedBookmarks,
+          highlights: mergedHighlights,
+          annotations: mergedAnnotations,
+          lastReadAt,
+          updatedAt: serverTimestamp(),
+        };
+        if (serverSnap.exists()) {
+          tx.update(ref, docPayload);
+        } else {
+          tx.set(ref, {
+            userId: current.uid,
+            materialId: safeMaterialId,
+            ...docPayload,
+          });
+        }
+      });
     } catch (err) {
       setSyncError('Erro ao sincronizar histórico de leitura.');
       handleFirestoreError(err, OperationType.WRITE, path);
@@ -4628,6 +4896,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         syncError,
         clearSyncError: () => setSyncError(null),
         workspaceAccessToken,
+        hasWorkspaceScope,
         connectGoogleWorkspace,
         clearWorkspaceToken,
         effectiveRole,
@@ -4702,6 +4971,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         resendVerification,
         refreshAuthState,
         logout,
+        exportMyData,
+        deleteMyAccount,
         updateProfileSettings,
         updateUserRole,
         toggleUserActive,

@@ -5,6 +5,7 @@ import {
   Bell,
   CheckCircle2,
   Cloud,
+  Download,
   Eye,
   EyeOff,
   GraduationCap,
@@ -15,7 +16,9 @@ import {
   Palette,
   Play,
   RefreshCw,
+  ShieldCheck,
   Smartphone,
+  Trash2,
   UserCheck,
 } from 'lucide-react';
 import { DEFAULT_STUDENT_PREFERENCES, useAuth } from '../contexts/AuthContext';
@@ -70,6 +73,8 @@ export function SettingsView({
     updateProfileSettings,
     logout,
     exitGuestMode,
+    exportMyData,
+    deleteMyAccount,
   } = useAuth();
 
   const [displayName, setDisplayName] = useState(profile?.displayName || '');
@@ -87,6 +92,10 @@ export function SettingsView({
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [exportingData, setExportingData] = useState(false);
+  const [deleteStepOpen, setDeleteStepOpen] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   useEffect(() => {
     if (!profile) return;
@@ -180,6 +189,36 @@ export function SettingsView({
 
   const handleShowAllCards = () => {
     void handleUpdateVisualPref({ hiddenDashboardCards: [] });
+  };
+
+  const handleExportMyData = async () => {
+    setExportingData(true);
+    setErrorMsg(null);
+    setFeedback(null);
+    try {
+      await exportMyData();
+      setFeedback('Seus dados foram exportados em JSON com sucesso.');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Não foi possível exportar seus dados agora.');
+    } finally {
+      setExportingData(false);
+    }
+  };
+
+  const handleDeleteMyAccount = async () => {
+    if (deleteConfirmText.trim().toUpperCase() !== 'EXCLUIR') {
+      setErrorMsg('Digite EXCLUIR exatamente para confirmar a remoção definitiva.');
+      return;
+    }
+    setDeletingAccount(true);
+    setErrorMsg(null);
+    setFeedback(null);
+    try {
+      await deleteMyAccount();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Não foi possível excluir sua conta agora.');
+      setDeletingAccount(false);
+    }
   };
 
   return (
@@ -769,6 +808,94 @@ export function SettingsView({
                     <UserCheck className="w-3.5 h-3.5 text-[#146C43] dark:text-emerald-400" />
                     <span>Acesso Familiar e Compartilhado</span>
                   </button>
+                )}
+              </div>
+            </div>
+          </SectionCard>
+
+          <SectionCard
+            title="Privacidade e LGPD"
+            subtitle="Consulte a política de uso, baixe seus registros em JSON ou exclua sua conta"
+          >
+            <div className="space-y-3 text-xs">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => onNavigate('privacy')}
+                  className="min-h-[40px] px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:border-[#0B3321] rounded-xl font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-[#146C43] dark:text-emerald-400" />
+                  <span>Política de Privacidade e Termos</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void handleExportMyData()}
+                  disabled={exportingData}
+                  className="min-h-[40px] px-3.5 py-2 bg-[#E8F3EC] dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 rounded-xl font-semibold text-[#0B3321] dark:text-emerald-200 inline-flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#146C43] dark:text-emerald-400" />
+                  <span>{exportingData ? 'Exportando...' : 'Exportar meus dados'}</span>
+                </button>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2.5">
+                {!deleteStepOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeleteStepOpen(true);
+                      setDeleteConfirmText('');
+                    }}
+                    className="min-h-[40px] px-3.5 py-2 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/50 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-200 rounded-xl font-semibold inline-flex items-center gap-1.5"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Excluir minha conta e dados</span>
+                  </button>
+                ) : (
+                  <div className="p-3.5 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 space-y-2.5">
+                    <p className="font-bold text-red-900 dark:text-red-200">
+                      Atenção: esta ação é permanente e apaga seu perfil, histórico de estudo, simulados, anotações e conta de acesso.
+                    </p>
+                    <div>
+                      <label
+                        htmlFor="lgpd-delete-confirm"
+                        className="block text-xs font-semibold text-red-900 dark:text-red-200 mb-1"
+                      >
+                        Para confirmar, digite EXCLUIR:
+                      </label>
+                      <input
+                        id="lgpd-delete-confirm"
+                        type="text"
+                        value={deleteConfirmText}
+                        onChange={(e) => setDeleteConfirmText(e.target.value)}
+                        placeholder="EXCLUIR"
+                        className="w-full min-h-[40px] px-3 py-1.5 text-xs font-mono bg-white dark:bg-slate-900 border border-red-300 dark:border-red-700 rounded-xl text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-red-600"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={deletingAccount || deleteConfirmText.trim().toUpperCase() !== 'EXCLUIR'}
+                        onClick={() => void handleDeleteMyAccount()}
+                        className="min-h-[40px] px-3.5 py-2 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white rounded-xl font-semibold inline-flex items-center gap-1.5"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>{deletingAccount ? 'Excluindo...' : 'Confirmar exclusão definitiva'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={deletingAccount}
+                        onClick={() => {
+                          setDeleteStepOpen(false);
+                          setDeleteConfirmText('');
+                        }}
+                        className="min-h-[40px] px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl font-semibold"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
             </div>

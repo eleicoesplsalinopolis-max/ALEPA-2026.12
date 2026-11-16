@@ -16,6 +16,8 @@
         "dailyGoalMinutes": { "type": "integer" },
         "examDate": { "type": "string", "maxLength": 20 },
         "targetCargo": { "type": "string", "maxLength": 120 },
+        "privacyAcceptedAt": { "type": "string", "maxLength": 40 },
+        "privacyVersion": { "type": "string", "maxLength": 32 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },

@@ -97,6 +97,9 @@ const PortugueseRepositoryView = lazy(() =>
 const RequestsCenterView = lazy(() =>
   import('./components/RequestsCenterView').then((m) => ({ default: m.RequestsCenterView }))
 );
+const PrivacyView = lazy(() =>
+  import('./components/PrivacyView').then((m) => ({ default: m.PrivacyView }))
+);
 
 function RouteLoadingFallback() {
   return (
@@ -145,6 +148,7 @@ const SIDEBAR_GROUPS: SidebarNavGroup[] = [
       { id: 'performance', label: 'Desempenho', icon: BarChart3 },
       { id: 'family', label: 'Familiares', icon: Users },
       { id: 'settings', label: 'Configurações', icon: Settings },
+      { id: 'privacy', label: 'Privacidade e Termos', icon: ShieldCheck },
     ],
   },
 ];
@@ -439,6 +443,7 @@ function CampusShell() {
       groupLabel: 'Gestão e configurações',
       items: [
         { id: 'settings', label: 'Configurações', subtitle: 'Meta, cargo e conta', icon: Settings },
+        { id: 'privacy', label: 'Privacidade e Termos', subtitle: 'LGPD, exportação e dados', icon: ShieldCheck },
       ],
     },
   ];
@@ -478,7 +483,9 @@ function CampusShell() {
                                     ? 'Familiares'
                                     : activeTab === 'settings'
                                       ? 'Configurações'
-                                      : 'Início';
+                                      : activeTab === 'privacy'
+                                        ? 'Privacidade e Termos'
+                                        : 'Início';
 
   const handleStartFocusTimer = (disciplineId: string, topicTitle: string) => {
     setTimerPreset({ disciplineId, topicTitle });
@@ -1047,6 +1054,12 @@ function CampusShell() {
                 onNavigate={navigateTo}
               />
             )}
+            {activeTab === 'privacy' && (
+              <PrivacyView
+                onBack={() => navigateTo('dashboard')}
+                onNavigateSettings={() => navigateTo('settings')}
+              />
+            )}
             {activeTab === 'teacher' && canAccessTeacherPanel && (
               <TeacherConsoleView
                 campus={selectedCampus}
@@ -1062,6 +1075,16 @@ function CampusShell() {
               />
             )}
           </Suspense>
+          <footer className="pt-4 border-t border-slate-200/80 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+            <span>Meu Campus ALEPA 2026 · Editais 001/2026 e 002/2026</span>
+            <button
+              type="button"
+              onClick={() => navigateTo('privacy')}
+              className="underline hover:text-[#0B3321] dark:hover:text-emerald-300 font-medium"
+            >
+              Política de Privacidade e Termos
+            </button>
+          </footer>
         </main>
       </div>
 

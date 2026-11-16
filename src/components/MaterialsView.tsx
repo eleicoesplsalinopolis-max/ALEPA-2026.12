@@ -551,14 +551,18 @@ export function MaterialsView({
     }
   }, [driveBrowserOpen, workspaceAccessToken, currentFolder.id, driveFilterKind, loadDriveFolderContents]);
 
-  const handleConnectDrive = async (): Promise<string | null> => {
+  const connectDriveWithScopes = async (
+    scopes: Array<'drive' | 'sheets' | 'slides'> = ['drive']
+  ): Promise<string | null> => {
     setDriveConnecting(true);
     setDriveError(null);
     try {
-      const token = await connectGoogleWorkspace();
+      const token = await connectGoogleWorkspace(scopes);
       if (token) {
-        setDriveBrowserOpen(true);
-        await loadDriveFolderContents(currentFolder.id, token);
+        if (scopes.includes('drive')) {
+          setDriveBrowserOpen(true);
+          await loadDriveFolderContents(currentFolder.id, token);
+        }
       }
       return token;
     } catch (err) {
@@ -569,6 +573,8 @@ export function MaterialsView({
       setDriveConnecting(false);
     }
   };
+
+  const handleConnectDrive = async (): Promise<string | null> => connectDriveWithScopes(['drive']);
 
   const openFolderInBrowser = async (folderId: string, fallbackName = 'Pasta do Drive', tokenOverride?: string | null) => {
     const token = tokenOverride ?? workspaceAccessToken;
@@ -3035,7 +3041,7 @@ export function MaterialsView({
                       <button
                         type="button"
                         onClick={async () => {
-                          const token = await handleConnectDrive();
+                          const token = await connectDriveWithScopes(['sheets']);
                           if (token && viewerParsed.id) {
                             const data = await fetchGoogleSpreadsheet(token, viewerParsed.id);
                             setExcelSheets(data.sheets);
@@ -3121,7 +3127,7 @@ export function MaterialsView({
                       <button
                         type="button"
                         onClick={async () => {
-                          const token = await handleConnectDrive();
+                          const token = await connectDriveWithScopes(['slides']);
                           if (token && viewerParsed.id) {
                             const pres = await fetchGooglePresentation(token, viewerParsed.id);
                             setGoogleSlides(pres.slides);

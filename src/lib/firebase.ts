@@ -1,6 +1,12 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { doc, getDocFromServer, initializeFirestore } from 'firebase/firestore';
+import {
+  doc,
+  getDocFromServer,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+} from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -8,7 +14,10 @@ const app = initializeApp(firebaseConfig);
 const firestoreDatabaseId = (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId;
 export const db = initializeFirestore(
   app,
-  { experimentalAutoDetectLongPolling: true },
+  {
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+    experimentalAutoDetectLongPolling: true,
+  },
   firestoreDatabaseId
 );
 export const auth = getAuth(app);
@@ -19,17 +28,15 @@ export const FIREBASE_CONSOLE_STORAGE_URL = `https://console.firebase.google.com
 export const googleAuthProvider = new GoogleAuthProvider();
 export const workspaceAuthProvider = new GoogleAuthProvider();
 
-export const WORKSPACE_SCOPES = [
-  'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/spreadsheets.readonly',
-  'https://www.googleapis.com/auth/presentations.readonly',
-  'https://www.googleapis.com/auth/calendar.events',
-  'https://www.googleapis.com/auth/gmail.send',
-] as const;
+export const WORKSPACE_SCOPES = {
+  drive: ['https://www.googleapis.com/auth/drive.readonly'],
+  sheets: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  slides: ['https://www.googleapis.com/auth/presentations.readonly'],
+  calendar: ['https://www.googleapis.com/auth/calendar.events'],
+  gmail: ['https://www.googleapis.com/auth/gmail.send'],
+} as const;
 
-WORKSPACE_SCOPES.forEach((scope) => {
-  workspaceAuthProvider.addScope(scope);
-});
+export type WorkspaceScopeKey = keyof typeof WORKSPACE_SCOPES;
 
 export const ADMIN_EMAIL = 'SavioBaia6@gmail.com';
 export const ADMIN_EMAILS = [

@@ -10,19 +10,23 @@ import {
   FileText,
   FlipHorizontal,
   History,
+  Key,
   Loader2,
   MessageSquare,
   Network,
   Send,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Upload,
   Video,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { isMedioDisciplineId } from '../data/alepaMedioSyllabus';
 import { getDisciplineShortName } from '../data/alepaSyllabus';
 import { apiFetch } from '../lib/apiClient';
+import { getClientAiKeys, saveClientAiKeys } from '../lib/clientAiEngine';
 import { getLocalFile } from '../lib/localFiles';
 import { CampusLevel, FlashcardItem, MindMapData, Question, StudyMaterial } from '../types';
 import { extractYouTubeId, normalizeUrlInput } from '../utils/mediaUrls';
@@ -266,6 +270,13 @@ export function GeminiSummaryView({
   const [attachedMaterialIds, setAttachedMaterialIds] = useState<string[]>([]);
   const [libraryPickerQuery, setLibraryPickerQuery] = useState('');
   const [aiUsage, setAiUsage] = useState<AiUsageSnapshotClient | null>(null);
+
+  // Client-Side AI Keys Configuration State
+  const [showKeysModal, setShowKeysModal] = useState(false);
+  const [geminiKeyInput, setGeminiKeyInput] = useState('');
+  const [groqKeyInput, setGroqKeyInput] = useState('');
+  const [openRouterKeyInput, setOpenRouterKeyInput] = useState('');
+  const [keysSaveMessage, setKeysSaveMessage] = useState<string | null>(null);
 
   const refreshAiUsage = async () => {
     try {
@@ -719,6 +730,21 @@ export function GeminiSummaryView({
             <span>Abrir Gemini Web</span>
             <ExternalLink className="w-3.5 h-3.5" />
           </a>
+          <button
+            type="button"
+            onClick={() => {
+              const current = getClientAiKeys();
+              setGeminiKeyInput(current.geminiApiKey);
+              setGroqKeyInput(current.groqApiKey);
+              setOpenRouterKeyInput(current.openrouterApiKey);
+              setKeysSaveMessage(null);
+              setShowKeysModal(true);
+            }}
+            className="min-h-[40px] px-3.5 py-2 border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 text-[#0B3321] dark:text-emerald-200 text-xs font-semibold rounded-xl inline-flex items-center gap-1.5 whitespace-nowrap shadow-xs"
+          >
+            <Key className="w-3.5 h-3.5" />
+            <span>Configurar Chaves</span>
+          </button>
         </div>
       </div>
 
@@ -1509,6 +1535,139 @@ export function GeminiSummaryView({
             })}
           </div>
         </section>
+      )}
+
+      {/* Modal: Configurar Chaves de IA (Client-Side) */}
+      {showKeysModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs"
+        >
+          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/80 dark:bg-slate-800/50">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-[#0B3321] dark:text-emerald-300 flex items-center justify-center font-bold">
+                  <Key className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-display text-sm font-bold text-slate-900 dark:text-white">
+                    Configurar Chaves de IA
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Armazenadas com segurança no seu navegador (localStorage)
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowKeysModal(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"
+                aria-label="Fechar"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Form */}
+            <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
+              <div className="p-3 rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800/80 text-xs text-emerald-900 dark:text-emerald-200 flex items-start gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-700 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <p>
+                  As chaves abaixo garantem que o <strong>Professor IA</strong> e as <strong>IAs de Reserva</strong> funcionem diretamente no seu dispositivo sem falhas por cota gratuita.
+                </p>
+              </div>
+
+              {keysSaveMessage && (
+                <div className="p-3 rounded-xl bg-emerald-100 dark:bg-emerald-900/60 border border-emerald-300 dark:border-emerald-700 text-xs text-emerald-900 dark:text-emerald-100 flex items-center gap-2">
+                  <Check className="w-4 h-4 text-emerald-700 dark:text-emerald-300 shrink-0" />
+                  <span>{keysSaveMessage}</span>
+                </div>
+              )}
+
+              {/* Field 1: Gemini */}
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                  <span>1. Chave Google Gemini (gemini-2.5-flash)</span>
+                  <span className="text-[10px] text-emerald-700 dark:text-emerald-400 font-semibold">Padrão</span>
+                </label>
+                <input
+                  type="password"
+                  value={geminiKeyInput}
+                  onChange={(e) => setGeminiKeyInput(e.target.value)}
+                  placeholder="AIzaSy..."
+                  autoComplete="off"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <p className="text-[10px] text-slate-500">Salva como gemini_api_key no localStorage</p>
+              </div>
+
+              {/* Field 2: Groq */}
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                  <span>2. Chave Groq (llama-3.3-70b-versatile)</span>
+                  <span className="text-[10px] text-slate-500 font-semibold">Reserva 1</span>
+                </label>
+                <input
+                  type="password"
+                  value={groqKeyInput}
+                  onChange={(e) => setGroqKeyInput(e.target.value)}
+                  placeholder="gsk_..."
+                  autoComplete="off"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <p className="text-[10px] text-slate-500">Salva como groq_api_key no localStorage</p>
+              </div>
+
+              {/* Field 3: OpenRouter */}
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                  <span>3. Chave OpenRouter (meta-llama/llama-3.3-70b-instruct:free)</span>
+                  <span className="text-[10px] text-slate-500 font-semibold">Reserva 2</span>
+                </label>
+                <input
+                  type="password"
+                  value={openRouterKeyInput}
+                  onChange={(e) => setOpenRouterKeyInput(e.target.value)}
+                  placeholder="sk-or-v1-..."
+                  autoComplete="off"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <p className="text-[10px] text-slate-500">Salva como openrouter_api_key no localStorage</p>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowKeysModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+              >
+                Fechar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  saveClientAiKeys({
+                    geminiApiKey: geminiKeyInput,
+                    groqApiKey: groqKeyInput,
+                    openrouterApiKey: openRouterKeyInput,
+                  });
+                  setKeysSaveMessage('Chaves salvas com sucesso!');
+                  setTimeout(() => {
+                    setKeysSaveMessage(null);
+                  }, 3000);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[#0B3321] hover:bg-emerald-900 shadow-xs inline-flex items-center gap-1.5"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Salvar Chaves</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

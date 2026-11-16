@@ -78,6 +78,23 @@ describe('Spotify Target Parser & CSP Header', () => {
     expect(csp).toContain("worker-src 'self' blob:");
     expect(csp).toContain("frame-ancestors 'self' https://aistudio.google.com");
     expect(csp).toContain('https://firebasestorage.googleapis.com');
+    const frameSrc = csp.split(';').find((d) => d.trim().startsWith('frame-src')) || '';
+    for (const host of [
+      'https://drive.google.com',
+      'https://docs.google.com',
+      'https://www.youtube.com',
+      'https://www.youtube-nocookie.com',
+      'https://open.spotify.com',
+      'https://embed.podcasts.apple.com',
+      'https://player.vimeo.com',
+      'https://view.officeapps.live.com',
+      'https://www.instagram.com',
+      'https://www.tiktok.com',
+      'https://accounts.google.com',
+      'https://*.firebaseapp.com',
+    ]) {
+      expect(frameSrc).toContain(host);
+    }
   });
 });
 
@@ -202,5 +219,28 @@ describe('HTTP Integration: Security Headers, Guest AI Quota Isolation, Proxy Ra
     });
     expect(badJson.status).toBe(400);
     expect(badJson.headers.get('content-type')).toContain('application/json');
+  });
+
+  it('rejects 200 KB JSON on /api/spotify/refresh with 413 while accepting 5 MB JSON on /api/gemini/summarize-pdf', async () => {
+    const oversizedRefresh = await fetch(`${proxySrv.baseUrl}/api/spotify/refresh`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '198.51.100.55',
+      },
+      body: JSON.stringify({ refreshToken: 'a'.repeat(200 * 1024) }),
+    });
+    expect(oversizedRefresh.status).toBe(413);
+    expect(oversizedRefresh.headers.get('content-type')).toContain('application/json');
+
+    const fiveMbPayload = await fetch(`${proxySrv.baseUrl}/api/gemini/summarize-pdf`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '198.51.100.56',
+      },
+      body: JSON.stringify({ base64: 'A'.repeat(5 * 1024 * 1024) }),
+    });
+    expect(fiveMbPayload.status).not.toBe(413);
   });
 });

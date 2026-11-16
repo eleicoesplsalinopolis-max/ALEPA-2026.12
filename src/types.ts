@@ -102,7 +102,8 @@ export type NavSection =
   | 'settings'
   | 'teacher'
   | 'admin'
-  | 'portuguese_repo';
+  | 'portuguese_repo'
+  | 'privacy';
 
 export type BlockType = 'theory' | 'questions' | 'correction' | 'revision';
 
@@ -215,6 +216,8 @@ export interface UserProfile {
   dailyGoalMinutes: number;
   examDate: string;
   targetCargo: string;
+  privacyAcceptedAt?: string;
+  privacyVersion?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 }

@@ -6,6 +6,7 @@ import emblemImg from '../assets/images/alepa_campus_emblem_1794572279329.jpg';
 import { useAuth } from '../contexts/AuthContext';
 import { OfflineIndicator, PWAInstallButton } from './PWAInstallButton';
 import { CONCURSO_PROFILE, getDaysUntilExam } from '../data/alepaSyllabus';
+import { PRIVACY_VERSION, PrivacyModal } from './PrivacyView';
 
 export function AuthView() {
   const { loginWithEmail, registerWithEmail, loginWithGoogle, enterGuestMode } = useAuth();
@@ -22,6 +23,8 @@ export function AuthView() {
   const [imgEmblemFailed, setImgEmblemFailed] = useState(false);
   const [guestName, setGuestName] = useState('');
   const [guestError, setGuestError] = useState<string | null>(null);
+  const [acceptedPrivacy, setAcceptedPrivacy] = useState(false);
+  const [privacyModalOpen, setPrivacyModalOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -70,15 +73,23 @@ export function AuthView() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    if (!acceptedPrivacy) {
+      setErrorMsg('É obrigatório marcar "Li e aceito a Política de Privacidade e os Termos" para continuar.');
+      return;
+    }
+    const acceptance = {
+      acceptedAt: new Date().toISOString().slice(0, 40),
+      version: PRIVACY_VERSION,
+    };
     setLoading(true);
     try {
       if (!isRegistering) {
-        await loginWithEmail(email, password);
+        await loginWithEmail(email, password, acceptance);
       } else {
         if (!displayName.trim()) {
           throw new Error('Informe seu nome completo.');
         }
-        await registerWithEmail(email, password, displayName, 'student');
+        await registerWithEmail(email, password, displayName, 'student', acceptance);
       }
     } catch (err) {
       setErrorMsg(mapAuthError(err));
@@ -89,9 +100,16 @@ export function AuthView() {
 
   const handleGoogle = async () => {
     setErrorMsg(null);
+    if (!acceptedPrivacy) {
+      setErrorMsg('É obrigatório marcar "Li e aceito a Política de Privacidade e os Termos" antes de entrar com Google.');
+      return;
+    }
     setLoading(true);
     try {
-      await loginWithGoogle();
+      await loginWithGoogle({
+        acceptedAt: new Date().toISOString().slice(0, 40),
+        version: PRIVACY_VERSION,
+      });
     } catch (err) {
       setErrorMsg(mapAuthError(err));
     } finally {
@@ -394,9 +412,37 @@ export function AuthView() {
               </div>
             </div>
 
+            <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
+              <label className="flex items-start gap-2.5 cursor-pointer text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+                <input
+                  type="checkbox"
+                  checked={acceptedPrivacy}
+                  onChange={(e) => {
+                    setAcceptedPrivacy(e.target.checked);
+                    if (errorMsg) setErrorMsg(null);
+                  }}
+                  className="mt-0.5 w-4 h-4 rounded border-slate-300 text-[#0B3321] focus:ring-[#146C43] shrink-0"
+                />
+                <span>
+                  Li e aceito a{' '}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setPrivacyModalOpen(true);
+                    }}
+                    className="font-semibold underline text-[#0B3321] dark:text-emerald-300 hover:text-[#146C43]"
+                  >
+                    Política de Privacidade e os Termos
+                  </button>{' '}
+                  (LGPD).
+                </span>
+              </label>
+            </div>
+
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || !acceptedPrivacy}
               className="w-full min-h-[46px] px-4 py-2.5 bg-[#0B3321] hover:bg-[#134b32] disabled:opacity-60 text-white text-sm font-semibold rounded-xl transition-colors inline-flex items-center justify-center gap-2"
             >
               {!loading && (isRegistering ? <UserPlus className="w-4 h-4" /> : <LogIn className="w-4 h-4" />)}
@@ -511,6 +557,7 @@ export function AuthView() {
         </div>
       </div>
       <OfflineIndicator />
+      <PrivacyModal open={privacyModalOpen} onClose={() => setPrivacyModalOpen(false)} />
     </div>
   );
 }

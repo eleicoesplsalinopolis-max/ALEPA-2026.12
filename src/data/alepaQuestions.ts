@@ -955,7 +955,7 @@ export const DEFAULT_STUDY_MATERIALS: StudyMaterial[] = [
     isSystemDefault: true,
   },
   {
-    id: 'mat_podcast_senado_radio',
+    id: 'mat_podcast_senado_radio_superior',
     ownerId: 'system',
     title: 'Podcast & Áudio Legislativo – Rádio Senado / Constituição e Leis em Áudio',
     disciplineId: 'direito_constitucional',

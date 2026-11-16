@@ -1005,7 +1005,10 @@ export function BookReaderModal({
   };
 
   const flushProgress = useCallback(
-    async (overrides?: Partial<typeof latestStateRef.current>) => {
+    async (
+      overrides?: Partial<typeof latestStateRef.current>,
+      removedIds?: { bookmarks?: string[]; highlights?: string[]; annotations?: string[] }
+    ) => {
       if (!pdfDocRef.current && !structuredBookRef.current && numPages <= 1) return;
       const snap = { ...latestStateRef.current, ...overrides };
       const safeTotal = Math.max(1, snap.numPages);
@@ -1014,21 +1017,25 @@ export function BookReaderModal({
 
       setSaveStatus('saving');
       try {
-        await saveReadingProgress(material.id, {
-          materialTitle: material.title,
-          lastPage: safePage,
-          totalPages: safeTotal,
-          progressPercent: pct,
-          readingMode: snap.readingMode,
-          fontSize: snap.fontSize,
-          lineHeight: snap.lineHeight,
-          maxWidthCh: snap.maxWidthCh,
-          theme: snap.theme,
-          bookmarks: snap.bookmarks,
-          highlights: snap.highlights,
-          annotations: snap.annotations,
-          lastReadAt: new Date().toISOString(),
-        });
+        await saveReadingProgress(
+          material.id,
+          {
+            materialTitle: material.title,
+            lastPage: safePage,
+            totalPages: safeTotal,
+            progressPercent: pct,
+            readingMode: snap.readingMode,
+            fontSize: snap.fontSize,
+            lineHeight: snap.lineHeight,
+            maxWidthCh: snap.maxWidthCh,
+            theme: snap.theme,
+            bookmarks: snap.bookmarks,
+            highlights: snap.highlights,
+            annotations: snap.annotations,
+            lastReadAt: new Date().toISOString(),
+          },
+          removedIds
+        );
         setSaveStatus('saved');
       } catch {
         setSaveStatus('error');
@@ -1292,7 +1299,9 @@ export function BookReaderModal({
 
   const handleToggleQuickBookmark = () => {
     let next: ReaderBookmark[];
+    let removedBookmarkIds: string[] | undefined;
     if (currentPageBookmarks.length > 0) {
+      removedBookmarkIds = currentPageBookmarks.map((b) => b.id);
       next = bookmarks.filter((b) => b.page !== currentPage);
     } else {
       const item: ReaderBookmark = {
@@ -1305,7 +1314,7 @@ export function BookReaderModal({
       setBookmarkLabel('');
     }
     setBookmarks(next);
-    void flushProgress({ bookmarks: next });
+    void flushProgress({ bookmarks: next }, removedBookmarkIds ? { bookmarks: removedBookmarkIds } : undefined);
   };
 
   const handleAddCustomBookmark = (e: React.FormEvent) => {
@@ -1325,7 +1334,7 @@ export function BookReaderModal({
   const handleDeleteBookmark = (id: string) => {
     const next = bookmarks.filter((b) => b.id !== id);
     setBookmarks(next);
-    void flushProgress({ bookmarks: next });
+    void flushProgress({ bookmarks: next }, { bookmarks: [id] });
   };
 
   // Highlight helpers
@@ -1351,7 +1360,7 @@ export function BookReaderModal({
   const handleDeleteHighlight = (id: string) => {
     const next = highlights.filter((h) => h.id !== id);
     setHighlights(next);
-    void flushProgress({ highlights: next });
+    void flushProgress({ highlights: next }, { highlights: [id] });
   };
 
   // Annotation helpers
@@ -1398,13 +1407,13 @@ export function BookReaderModal({
       setNoteTitle('');
       setNoteBody('');
     }
-    void flushProgress({ annotations: next });
+    void flushProgress({ annotations: next }, { annotations: [id] });
   };
 
   const handleConnectDriveRetry = async () => {
     setConnectingDrive(true);
     try {
-      const token = await connectGoogleWorkspace();
+      const token = await connectGoogleWorkspace(['drive']);
       if (token) {
         await loadDocument(token);
       }

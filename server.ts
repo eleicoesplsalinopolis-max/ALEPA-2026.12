@@ -20,11 +20,13 @@ import {
 import {
   AiQuotaManager,
   AiResponseCache,
-  validateExtractedQuestions,
   type AiQuotaIdentity,
   type AiQuotaTier,
-  type ExtractedQuestionCandidate,
 } from './server/ai/quotaAndCache.ts';
+import {
+  buildLinesFromPageTextInputs,
+  runDeterministicQuestionPipeline,
+} from './server/parser/deterministicQuestionParser.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -607,8 +609,8 @@ export function buildCspHeader(): string {
     "font-src 'self' data: https://fonts.gstatic.com",
     "img-src 'self' data: blob: https:",
     "media-src 'self' blob: https:",
-    "connect-src 'self' blob: data: https://*.googleapis.com https://*.firebaseio.com https://*.cloudfunctions.net https://*.firebaseapp.com https://firebasestorage.googleapis.com https://accounts.google.com https://oauth2.googleapis.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com wss://*.firebaseio.com https://open.spotify.com https://api.spotify.com",
-    "frame-src 'self' https://drive.google.com https://docs.google.com https://www.youtube.com https://www.youtube-nocookie.com https://open.spotify.com https://accounts.google.com https://*.firebaseapp.com",
+    "connect-src 'self' blob: data: https://*.googleapis.com https://*.firebaseio.com https://*.cloudfunctions.net https://*.firebaseapp.com https://firebasestorage.googleapis.com https://accounts.google.com https://oauth2.googleapis.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com wss://*.firebaseio.com https://open.spotify.com https://api.spotify.com https://api.groq.com https://openrouter.ai",
+    "frame-src 'self' https://drive.google.com https://docs.google.com https://www.youtube.com https://www.youtube-nocookie.com https://open.spotify.com https://embed.podcasts.apple.com https://player.vimeo.com https://view.officeapps.live.com https://www.instagram.com https://www.tiktok.com https://accounts.google.com https://*.firebaseapp.com",
     "form-action 'self' https://accounts.spotify.com https://accounts.google.com",
   ].join('; ');
 }
@@ -756,9 +758,13 @@ export async function createApp(options?: {
     windowMs: 60_000,
   });
 
-  app.use(express.json({ limit: '28mb' }));
-  app.use('/api/gemini', attachOptionalAuth, geminiRateLimiter);
-  app.use('/api/ai', attachOptionalAuth);
+  const aiJson = express.json({ limit: '28mb' });
+  const smallJson = express.json({ limit: '100kb' });
+
+  app.use('/api/gemini', attachOptionalAuth, geminiRateLimiter, aiJson);
+  app.use('/api/ai', attachOptionalAuth, aiJson);
+  app.use('/api/admin', aiJson);
+  app.use(smallJson);
   app.use(
     '/api/materials/pdf-proxy',
     attachOptionalAuth,
@@ -1760,6 +1766,183 @@ export async function createApp(options?: {
     } catch (err) {
       const mapped = formatGeminiError(err);
       res.status(mapped.status).json({ error: mapped.message });
+    }
+  });
+
+  // Rota de contingência para Professor IA (executada no Node sem restrição de sandbox/CORS do navegador)
+  app.post('/api/explicar-ia', async (req: Request, res: Response) => {
+    try {
+      const { prompt, provedor, chaves } = req.body || {};
+      if (!prompt || typeof prompt !== 'string') {
+        return res.status(400).json({ erro: 'Prompt não fornecido ou inválido.' });
+      }
+
+      const geminiKey = (chaves?.gemini || process.env.GEMINI_API_KEY || '').trim();
+      const groqKey = (chaves?.groq || process.env.GROQ_API_KEY || '').trim();
+      const openrouterKey = (chaves?.openrouter || process.env.OPENROUTER_API_KEY || '').trim();
+
+      const choice = (provedor || 'auto').toLowerCase();
+      const errors: string[] = [];
+
+      const callGeminiNode = async (key: string): Promise<string> => {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`;
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.3 },
+          }),
+        });
+        if (r.status === 429) throw new Error('Limite de cota excedido no Gemini (429)');
+        const raw = await r.text();
+        let j: any = null;
+        try { j = JSON.parse(raw); } catch { throw new Error(`Gemini retornou status ${r.status}`); }
+        if (!r.ok) throw new Error(j?.error?.message || `Erro Gemini ${r.status}`);
+        const text = j?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text || !text.trim()) throw new Error('Resposta vazia do Gemini');
+        return text.trim();
+      };
+
+      const callGroqNode = async (key: string): Promise<string> => {
+        const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${key}`,
+          },
+          body: JSON.stringify({
+            model: 'llama-3.3-70b-versatile',
+            messages: [
+              {
+                role: 'system',
+                content: 'Você é um Professor Especialista na banca CETAP para concursos públicos da ALEPA.',
+              },
+              { role: 'user', content: prompt },
+            ],
+            temperature: 0.3,
+          }),
+        });
+        if (r.status === 429) throw new Error('Limite de requisições excedido na Groq (429)');
+        const raw = await r.text();
+        let j: any = null;
+        try { j = JSON.parse(raw); } catch { throw new Error(`Groq retornou status ${r.status}`); }
+        if (!r.ok) throw new Error(j?.error?.message || `Erro Groq ${r.status}`);
+        const text = j?.choices?.[0]?.message?.content;
+        if (!text || !text.trim()) throw new Error('Resposta vazia da Groq');
+        return text.trim();
+      };
+
+      const callOpenRouterNode = async (key: string): Promise<string> => {
+        const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${key}`,
+          },
+          body: JSON.stringify({
+            model: 'meta-llama/llama-3.3-70b-instruct:free',
+            messages: [
+              {
+                role: 'system',
+                content: 'Você é um Professor Especialista na banca CETAP para concursos públicos da ALEPA.',
+              },
+              { role: 'user', content: prompt },
+            ],
+            temperature: 0.3,
+          }),
+        });
+        if (r.status === 429) throw new Error('Limite de requisições excedido no OpenRouter (429)');
+        const raw = await r.text();
+        let j: any = null;
+        try { j = JSON.parse(raw); } catch { throw new Error(`OpenRouter retornou status ${r.status}`); }
+        if (!r.ok) throw new Error(j?.error?.message || `Erro OpenRouter ${r.status}`);
+        const text = j?.choices?.[0]?.message?.content;
+        if (!text || !text.trim()) throw new Error('Resposta vazia do OpenRouter');
+        return text.trim();
+      };
+
+      // 1. Se pediu OpenRouter especificamente:
+      if (choice === 'openrouter') {
+        if (openrouterKey) {
+          try {
+            const texto = await callOpenRouterNode(openrouterKey);
+            return res.status(200).json({ texto, motor: 'Respondido por OpenRouter (Free)' });
+          } catch (e: any) {
+            errors.push(`OpenRouter: ${e.message}`);
+          }
+        } else {
+          errors.push('OpenRouter: chave não informada');
+        }
+        return res.status(400).json({ erro: `Falha na IA Reserva 2 (${errors.join(' | ')}).` });
+      }
+
+      // 2. Se pediu Groq (ou se falhar, pula para OpenRouter):
+      if (choice === 'groq') {
+        if (groqKey) {
+          try {
+            const texto = await callGroqNode(groqKey);
+            return res.status(200).json({ texto, motor: 'Respondido por Groq (Llama 3.3)' });
+          } catch (e: any) {
+            errors.push(`Groq: ${e.message}`);
+          }
+        } else {
+          errors.push('Groq: chave não informada');
+        }
+
+        if (openrouterKey) {
+          try {
+            const texto = await callOpenRouterNode(openrouterKey);
+            return res.status(200).json({ texto, motor: 'Respondido por OpenRouter (Free)' });
+          } catch (e: any) {
+            errors.push(`OpenRouter: ${e.message}`);
+          }
+        } else {
+          errors.push('OpenRouter: chave não informada');
+        }
+
+        return res.status(400).json({ erro: `Falha na Groq e OpenRouter (${errors.join(' | ')}).` });
+      }
+
+      // 3. Modo Auto (Gemini -> Groq -> OpenRouter):
+      if (geminiKey) {
+        try {
+          const texto = await callGeminiNode(geminiKey);
+          return res.status(200).json({ texto, motor: 'Respondido por Gemini 2.5 Flash' });
+        } catch (e: any) {
+          errors.push(`Gemini: ${e.message}`);
+        }
+      } else {
+        errors.push('Gemini: chave não informada');
+      }
+
+      if (groqKey) {
+        try {
+          const texto = await callGroqNode(groqKey);
+          return res.status(200).json({ texto, motor: 'Respondido por Groq (Llama 3.3)' });
+        } catch (e: any) {
+          errors.push(`Groq: ${e.message}`);
+        }
+      } else {
+        errors.push('Groq: chave não informada');
+      }
+
+      if (openrouterKey) {
+        try {
+          const texto = await callOpenRouterNode(openrouterKey);
+          return res.status(200).json({ texto, motor: 'Respondido por OpenRouter (Free)' });
+        } catch (e: any) {
+          errors.push(`OpenRouter: ${e.message}`);
+        }
+      } else {
+        errors.push('OpenRouter: chave não informada');
+      }
+
+      return res.status(400).json({
+        erro: `Nenhuma IA conseguiu responder (${errors.join(' | ')}). Clique em "Configurar Chaves" para atualizar suas chaves de API.`,
+      });
+    } catch (err: any) {
+      return res.status(400).json({ erro: err?.message || 'Erro inesperado ao processar explicação com IA.' });
     }
   });
 
@@ -3103,7 +3286,6 @@ Regras obrigatórias:
     }
   });
 
-  app.post('/api/ai/extract-questions', geminiRateLimiter);
   app.post(
     '/api/ai/extract-questions',
     requireRole(['admin', 'editor', 'teacher', 'dev']),
@@ -3112,110 +3294,89 @@ Regras obrigatórias:
         const body = (req.body || {}) as {
           materialTitle?: string;
           disciplineName?: string;
+          disciplineId?: string;
           campusLevel?: 'superior' | 'medio';
           mode?: 'extract_existing' | 'generate_from_chunks';
-          count?: number;
           existingStatements?: string[];
           pages?: Array<{ pageNumber?: number; chapterTitle?: string; text?: string }>;
         };
 
         const pages = Array.isArray(body.pages)
-          ? body.pages
-              .filter((p) => p && typeof p.text === 'string' && p.text.trim().length > 20)
-              .slice(0, 12)
+          ? body.pages.filter((p) => p && typeof p.text === 'string' && p.text.trim().length > 20)
           : [];
 
         if (pages.length === 0) {
           res.status(400).json({
-            error: 'Envie ao menos um trecho ou página real do material para extrair ou elaborar questões.',
+            error: 'Envie ao menos um trecho ou página real do material para extração determinística de questões.',
           });
           return;
         }
 
-        const requestedCount = Math.max(1, Math.min(10, Number(body.count) || 5));
-        const mode = body.mode === 'extract_existing' ? 'extract_existing' : 'generate_from_chunks';
-        const validPageNumbers = pages
-          .map((p) => p.pageNumber)
-          .filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 1);
+        const normalizedPages = pages.map((p, idx) => ({
+          pageNumber:
+            typeof p.pageNumber === 'number' && Number.isInteger(p.pageNumber) && p.pageNumber >= 1
+              ? p.pageNumber
+              : idx + 1,
+          chapterTitle: typeof p.chapterTitle === 'string' ? p.chapterTitle : undefined,
+          text: String(p.text || ''),
+        }));
 
-        const ai = getGeminiClient();
-        const pagesText = pages
-          .map(
-            (p, idx) =>
-              `=== ${p.pageNumber ? `PÁGINA ${p.pageNumber}` : `BLOCO ${idx + 1}`}${
-                p.chapterTitle ? ` · ${String(p.chapterTitle).slice(0, 100)}` : ''
-              } ===\n${String(p.text || '').slice(0, 2200)}`
-          )
-          .join('\n\n');
-
-        const instruction =
-          mode === 'extract_existing'
-            ? 'Extraia fielmente as questões objetivas presentes nas páginas abaixo (convertendo ou completando para 5 alternativas A-E quando necessário e informando o sourcePage exato onde a questão aparece).'
-            : `Com base EXCLUSIVA nas páginas fornecidas abaixo, elabore ${requestedCount} questões objetivas inéditas no estilo Fundação CETAP (5 alternativas A-E, exatamente 1 correta, gabarito comentado e referência real de sourcePage + sourceExcerpt).`;
-
-        const response = await ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: [
-            body.materialTitle ? `Material: ${String(body.materialTitle).slice(0, 160)}` : '',
-            body.disciplineName ? `Disciplina: ${String(body.disciplineName).slice(0, 120)}` : '',
-            `Campus: ${body.campusLevel === 'medio' ? 'Nível Médio' : 'Nível Superior'}`,
-            instruction,
-            'REGRAS INEGOCIÁVEIS: Use SOMENTE números de página (sourcePage) listados nos cabeçalhos === PÁGINA N === abaixo. Nunca invente artigos de lei ou páginas. Se houver dúvida no gabarito ou na página, informe confidence menor que 0.7.',
-            pagesText,
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
-          config: {
-            systemInstruction:
-              'Extrator estruturado de questões ALEPA 2026 (Banca CETAP). Retorne JSON estrito com array questions.',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                questions: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      topicTitle: { type: Type.STRING },
-                      statement: { type: Type.STRING },
-                      options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                      correctIndex: { type: Type.INTEGER },
-                      explanation: { type: Type.STRING },
-                      legalBasis: { type: Type.STRING },
-                      sourcePage: { type: Type.INTEGER },
-                      sourceExcerpt: { type: Type.STRING },
-                      confidence: { type: Type.NUMBER },
-                    },
-                    required: ['topicTitle', 'statement', 'options', 'correctIndex', 'explanation'],
-                  },
-                },
-              },
-              required: ['questions'],
-            },
-          },
+        const lines = buildLinesFromPageTextInputs(normalizedPages);
+        const pipelineResult = runDeterministicQuestionPipeline(lines, {
+          campusLevel: body.campusLevel === 'superior' ? 'superior' : 'medio',
+          defaultDisciplineId: typeof body.disciplineId === 'string' ? body.disciplineId : undefined,
+          materialTitle: typeof body.materialTitle === 'string' ? body.materialTitle.slice(0, 160) : undefined,
+          authorId: (req as AuthenticatedRequest).authUser?.uid || 'system_deterministic_parser',
         });
 
-        const parsed = JSON.parse(response.text || '{}') as {
-          questions?: ExtractedQuestionCandidate[];
-        };
+        const normalizeDup = (txt: string) =>
+          txt
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
 
-        const validated = validateExtractedQuestions(
-          Array.isArray(parsed.questions) ? parsed.questions : [],
-          {
-            existingStatements: Array.isArray(body.existingStatements) ? body.existingStatements : [],
-            validPageNumbers,
-          }
+        const existingSet = new Set(
+          (Array.isArray(body.existingStatements) ? body.existingStatements : [])
+            .map((s) => normalizeDup(String(s || '')))
+            .filter((s) => s.length >= 16)
         );
 
+        const extracted = pipelineResult.validQuestions.map((q) => {
+          const flags = [...(q.reviewFlags || [])];
+          if (existingSet.has(normalizeDup(q.statement))) {
+            flags.push('possible_duplicate');
+          }
+          return {
+            id: q.id,
+            disciplineId: q.disciplineId,
+            topicTitle: q.topicTitle,
+            statement: q.statement,
+            options: q.options,
+            correctIndex: q.correctIndex,
+            explanation: q.explanation,
+            legalBasis: q.legalBasis,
+            difficulty: q.difficulty,
+            sourcePage: q.sourcePage,
+            sourceExcerpt: q.sourceExcerpt,
+            confidence: 1,
+            needsReview: true,
+            reviewFlags: Array.from(new Set(flags)),
+          };
+        });
+
         res.json({
-          questions: validated,
+          questions: extracted,
+          quarantinedQuestions: pipelineResult.quarantinedQuestions,
+          report: pipelineResult.report,
           requiresHumanReview: true,
-          model: GEMINI_MODEL,
+          mode: 'deterministic',
         });
       } catch (err) {
-        const mapped = formatGeminiError(err);
-        res.status(mapped.status).json({ error: mapped.message });
+        console.error('[extract-questions] Erro no parser determinístico:', err);
+        res.status(500).json({ error: 'Erro ao executar o parser determinístico de questões.' });
       }
     }
   );
@@ -3480,12 +3641,15 @@ Regras obrigatórias:
       next(err);
       return;
     }
+    const errObj = err as { status?: unknown; statusCode?: unknown; type?: unknown; name?: unknown };
     const status =
-      typeof (err as { status?: unknown })?.status === 'number'
-        ? ((err as { status: number }).status)
-        : typeof (err as { statusCode?: unknown })?.statusCode === 'number'
-          ? ((err as { statusCode: number }).statusCode)
-          : 500;
+      errObj?.type === 'entity.too.large' || errObj?.name === 'PayloadTooLargeError'
+        ? 413
+        : typeof errObj?.status === 'number'
+          ? errObj.status
+          : typeof errObj?.statusCode === 'number'
+            ? errObj.statusCode
+            : 500;
     if (req.path.startsWith('/api/')) {
       res.status(status).json({
         error:

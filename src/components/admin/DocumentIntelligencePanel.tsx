@@ -178,7 +178,6 @@ export function DocumentIntelligencePanel({
   const [indexingProgress, setIndexingProgress] = useState<{ done: number; total: number } | null>(null);
   const [extractTargetMat, setExtractTargetMat] = useState<StudyMaterial | null>(null);
   const [extractMode, setExtractMode] = useState<'extract_existing' | 'generate_from_chunks'>('extract_existing');
-  const [extractCount, setExtractCount] = useState<number>(4);
   const [extractBusy, setExtractBusy] = useState(false);
   const [extractCandidates, setExtractCandidates] = useState<ExtractedQuestionCandidate[]>([]);
 
@@ -494,12 +493,12 @@ export function DocumentIntelligencePanel({
         const resIdx = await indexMaterialDocument({
           material: extractTargetMat,
           workspaceAccessToken,
-          maxPdfPages: 200,
+          maxPdfPages: 500,
         });
         setIndexedMetas((prev) => ({ ...prev, [extractTargetMat.id]: resIdx.meta }));
         chunks = resIdx.chunks;
       }
-      const usableChunks = chunks.filter((c) => c.text.trim().length >= 30).slice(0, 12);
+      const usableChunks = chunks.filter((c) => c.text.trim().length >= 30);
       if (usableChunks.length === 0) {
         throw new Error('Não há trechos de texto selecionável suficientes neste material para extração.');
       }
@@ -513,9 +512,9 @@ export function DocumentIntelligencePanel({
         body: JSON.stringify({
           materialTitle: extractTargetMat.title,
           disciplineName: discName,
+          disciplineId: extractTargetMat.disciplineId,
           campusLevel: extractTargetMat.campusLevel === 'medio' ? 'medio' : 'superior',
           mode: extractMode,
-          count: extractCount,
           existingStatements: allManagedQuestions.slice(0, 200).map((q) => q.statement),
           pages: usableChunks.map((c, idx) => ({
             pageNumber: c.pageNumber || idx + 1,
@@ -1607,22 +1606,8 @@ export function DocumentIntelligencePanel({
                   onChange={(e) => setExtractMode(e.target.value as 'extract_existing' | 'generate_from_chunks')}
                   className="min-h-[40px] w-full rounded-lg border border-slate-200 bg-white px-2.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                 >
-                  <option value="extract_existing">Extrair questões existentes no documento</option>
-                  <option value="generate_from_chunks">Elaborar inéditas fiéis às páginas reais</option>
+                  <option value="extract_existing">Extração literal por regras (Questão N / Gabarito)</option>
                 </select>
-              </div>
-              <div className="w-28">
-                <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  Quantidade
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={extractCount}
-                  onChange={(e) => setExtractCount(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
-                  className="min-h-[40px] w-full rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-mono dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                />
               </div>
               <button
                 type="button"
@@ -1630,8 +1615,8 @@ export function DocumentIntelligencePanel({
                 onClick={() => void handleRunExtractQuestions()}
                 className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-[#0B3321] px-4 text-xs font-semibold text-white hover:bg-[#146C43] disabled:opacity-60"
               >
-                {extractBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                <span>{extractBusy ? 'Processando blocos...' : 'Executar Extração (IA)'}</span>
+                {extractBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScanSearch className="h-4 w-4" />}
+                <span>{extractBusy ? 'Extraindo blocos...' : 'Extrair Questões (Determinístico)'}</span>
               </button>
             </div>
 

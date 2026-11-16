@@ -3,15 +3,18 @@ import {
   AlertTriangle,
   Bookmark,
   BookOpen,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clock,
   ExternalLink,
   Flag,
+  Key,
   Loader2,
   Plus,
   RotateCcw,
+  Settings,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -20,7 +23,14 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import { getMedioCargoInfo, isMedioDisciplineId } from '../data/alepaMedioSyllabus';
 import { getDisciplineShortName } from '../data/alepaSyllabus';
-import { apiFetch } from '../lib/apiClient';
+import {
+  explainQuestionWithFallback,
+  getCachedExplanation,
+  getClientAiKeys,
+  saveClientAiKeys,
+  type AiProviderChoice,
+} from '../lib/clientAiEngine';
+import { generateQuestionsClientSide } from '../lib/geminiService';
 import { searchDocumentIndexWithFallback } from '../lib/documentIndexer';
 import { isInAppReadableMaterial } from '../lib/epubAndHtmlEngine';
 import {
@@ -161,7 +171,17 @@ export function SimuladosView({
   const [flaggedIds, setFlaggedIds] = useState<Record<string, boolean>>({});
   const [aiExplainingId, setAiExplainingId] = useState<string | null>(null);
   const [aiExplanations, setAiExplanations] = useState<Record<string, string>>({});
+  const [aiEngineChoice, setAiEngineChoice] = useState<AiProviderChoice>('auto');
+  const [aiEngineLabels, setAiEngineLabels] = useState<Record<string, string>>({});
+  const [aiExplainingError, setAiExplainingError] = useState<Record<string, string>>({});
   const [generatingAiDeck, setGeneratingAiDeck] = useState(false);
+
+  // Client-Side AI Keys Configuration Modal State
+  const [showSimKeysModal, setShowSimKeysModal] = useState(false);
+  const [simGeminiKeyInput, setSimGeminiKeyInput] = useState('');
+  const [simGroqKeyInput, setSimGroqKeyInput] = useState('');
+  const [simOpenRouterKeyInput, setSimOpenRouterKeyInput] = useState('');
+  const [simKeysSaveMessage, setSimKeysSaveMessage] = useState<string | null>(null);
 
   // Create Question Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -447,25 +467,16 @@ export function SimuladosView({
     setGeneratingAiDeck(true);
     setSaveFeedback(null);
     try {
-      const res = await apiFetch('/api/gemini/professor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'generate_questions',
-          campus,
-          disciplineName: disc.name,
-          topicTitle: disc.topics[0]?.title || disc.name,
-          subtopics: disc.topics[0]?.subtopics || [],
-          questionCount: 3,
-        }),
+      const generated = await generateQuestionsClientSide({
+        campus,
+        disciplineId: disc.id,
+        disciplineName: disc.name,
+        topicTitle: disc.topics[0]?.title || disc.name,
+        subtopics: disc.topics[0]?.subtopics || [],
+        questionCount: 3,
       });
-      const json = (await res.json()) as { error?: string; questions?: Question[] };
-      if (!res.ok || !Array.isArray(json.questions) || json.questions.length === 0) {
-        throw new Error(json.error || 'Não foi possível gerar questões com IA.');
-      }
-      const mapped = json.questions.map((q) => ({ ...q, disciplineId: disc.id }));
-      setMode('treino');
-      setActiveDeck(mapped);
+
+      setActiveDeck(generated);
       setCurrentIndex(0);
       setAnswers({});
       setSubmitted(false);
@@ -473,7 +484,7 @@ export function SimuladosView({
       setAddedErrors({});
       setFlaggedIds({});
       setRestoredDraftNotice(false);
-      setActiveSessionTitle(`Treino IA · ${disc.shortName} (${mapped.length}q inéditas)`);
+      setActiveSessionTitle(`Treino IA · ${disc.shortName} (${generated.length}q inéditas)`);
       setSaveFeedback(`3 questões inéditas de ${disc.shortName} geradas pelo Professor IA (marcadas como treino não oficial).`);
     } catch (err) {
       setSaveFeedback(err instanceof Error ? err.message : 'Erro ao gerar questões com IA.');
@@ -482,31 +493,39 @@ export function SimuladosView({
     }
   };
 
-  const handleExplainCurrentWithAi = async (q: Question) => {
+  const handleExplainCurrentWithAi = async (q: Question, engineOverride?: AiProviderChoice) => {
     setAiExplainingId(q.id);
+    setAiExplainingError((prev) => {
+      const copy = { ...prev };
+      delete copy[q.id];
+      return copy;
+    });
+
+    const choice = engineOverride || aiEngineChoice;
+
     try {
-      const res = await apiFetch('/api/gemini/professor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'explain_question',
-          campus,
-          disciplineName: getDisciplineShortName(q.disciplineId),
-          topicTitle: q.topicTitle,
-          questionStatement: q.statement,
-          questionOptions: q.options,
-          correctIndex: q.correctIndex,
-          selectedIndex: answers[q.id],
-          legalBasis: q.legalBasis,
-        }),
+      const studentChoiceLetter =
+        answers[q.id] !== undefined && LETTERS[answers[q.id]]
+          ? LETTERS[answers[q.id]]
+          : undefined;
+
+      const result = await explainQuestionWithFallback({
+        questionId: q.id,
+        enunciado: q.statement,
+        alternativas: q.options,
+        gabarito: LETTERS[q.correctIndex],
+        respostaAluno: studentChoiceLetter,
+        paginaMaterial: q.sourcePage,
+        trechoMaterial: q.sourceExcerpt || q.topicTitle,
+        preferredEngine: choice,
       });
-      const json = (await res.json()) as { error?: string; text?: string };
-      if (!res.ok || !json.text) {
-        throw new Error(json.error || 'Erro ao explicar questão.');
-      }
-      setAiExplanations((prev) => ({ ...prev, [q.id]: json.text! }));
+
+      setAiExplanations((prev) => ({ ...prev, [q.id]: result.text }));
+      setAiEngineLabels((prev) => ({ ...prev, [q.id]: result.providerLabel }));
     } catch (err) {
-      setSaveFeedback(err instanceof Error ? err.message : 'Não foi possível explicar com o Professor IA.');
+      const msg = err instanceof Error ? err.message : 'Não foi possível explicar com o Professor IA.';
+      setAiExplainingError((prev) => ({ ...prev, [q.id]: msg }));
+      setSaveFeedback(msg);
     } finally {
       setAiExplainingId(null);
     }
@@ -575,6 +594,21 @@ export function SimuladosView({
 
   const currentQuestion = activeDeck[currentIndex];
   const selectedAnswer = currentQuestion ? answers[currentQuestion.id] : undefined;
+
+  useEffect(() => {
+    if (!currentQuestion) return;
+    const cached = getCachedExplanation(currentQuestion.id);
+    if (cached) {
+      setAiExplanations((prev) => {
+        if (prev[currentQuestion.id]) return prev;
+        return { ...prev, [currentQuestion.id]: cached.text };
+      });
+      setAiEngineLabels((prev) => {
+        if (prev[currentQuestion.id]) return prev;
+        return { ...prev, [currentQuestion.id]: cached.providerLabel };
+      });
+    }
+  }, [currentQuestion]);
 
   const handleSelectOption = async (optionIdx: number) => {
     if (!currentQuestion || submitted) return;
@@ -736,6 +770,23 @@ export function SimuladosView({
           >
             {generatingAiDeck ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
             <span>{generatingAiDeck ? 'Gerando IA...' : '3 Questões IA'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              const current = getClientAiKeys();
+              setSimGeminiKeyInput(current.geminiApiKey);
+              setSimGroqKeyInput(current.groqApiKey);
+              setSimOpenRouterKeyInput(current.openrouterApiKey);
+              setSimKeysSaveMessage(null);
+              setShowSimKeysModal(true);
+            }}
+            title="Configurar Chaves de IA (Gemini, Groq, OpenRouter)"
+            className="min-h-[44px] px-3.5 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 text-xs sm:text-sm font-semibold rounded-xl inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+          >
+            <Key className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            <span>Configurar Chaves de IA</span>
           </button>
 
           {canCreateQuestion && (
@@ -1675,17 +1726,26 @@ export function SimuladosView({
           </div>
 
           {(submitted || (mode === 'treino' && selectedAnswer !== undefined)) && (
-            <div className="p-4 sm:p-5 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                  Gabarito Comentado · Alternativa {LETTERS[currentQuestion.correctIndex]}
-                </p>
+            <div className="p-4 sm:p-5 rounded-2xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 space-y-3.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                 <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={`px-3 py-1 text-xs font-bold rounded-lg border ${
+                      selectedAnswer === currentQuestion.correctIndex
+                        ? 'bg-emerald-100 dark:bg-emerald-950/80 border-emerald-300 dark:border-emerald-800 text-[#0B3321] dark:text-emerald-200'
+                        : 'bg-red-100 dark:bg-red-950/80 border-red-300 dark:border-red-800 text-red-900 dark:text-red-200'
+                    }`}
+                  >
+                    Gabarito Comentado · Alternativa {LETTERS[currentQuestion.correctIndex]}
+                  </span>
                   {addedErrors[currentQuestion.id] && (
-                    <span className="text-xs font-medium text-amber-800 dark:text-amber-300">
+                    <span className="text-[11px] font-semibold text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-md border border-amber-200 dark:border-amber-800">
                       Adicionada ao Caderno de Erros
                     </span>
                   )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     disabled={openingSourceId === currentQuestion.id}
@@ -1703,11 +1763,12 @@ export function SimuladosView({
                         : 'Abrir material na pág./trecho'}
                     </span>
                   </button>
+
                   <button
                     type="button"
                     disabled={aiExplainingId === currentQuestion.id}
                     onClick={() => void handleExplainCurrentWithAi(currentQuestion)}
-                    className="min-h-[34px] px-3 py-1 rounded-lg bg-[#E8F3EC] dark:bg-emerald-950/60 hover:bg-emerald-100 text-[#0B3321] dark:text-emerald-200 text-xs font-semibold inline-flex items-center gap-1.5"
+                    className="min-h-[34px] px-3.5 py-1 rounded-lg bg-[#0B3321] hover:bg-[#134b32] text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs"
                   >
                     {aiExplainingId === currentQuestion.id ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1718,15 +1779,112 @@ export function SimuladosView({
                   </button>
                 </div>
               </div>
+
+              {/* Barra discreta de abas para troca manual de IA */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/70 dark:border-slate-700/70">
+                <div className="flex items-center gap-1 p-1 bg-slate-200/70 dark:bg-slate-900/70 rounded-xl">
+                  {(
+                    [
+                      { id: 'auto', label: 'Auto (Gemini)' },
+                      { id: 'groq', label: 'IA Reserva 1 (Groq)' },
+                      { id: 'openrouter', label: 'IA Reserva 2 (OpenRouter)' },
+                    ] as const
+                  ).map((tab) => {
+                    const active = aiEngineChoice === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => {
+                          setAiEngineChoice(tab.id);
+                          if (aiExplanations[currentQuestion.id]) {
+                            void handleExplainCurrentWithAi(currentQuestion, tab.id);
+                          }
+                        }}
+                        className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all ${
+                          active
+                            ? 'bg-white dark:bg-slate-800 text-[#0B3321] dark:text-emerald-300 shadow-xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const current = getClientAiKeys();
+                    setSimGeminiKeyInput(current.geminiApiKey);
+                    setSimGroqKeyInput(current.groqApiKey);
+                    setSimOpenRouterKeyInput(current.openrouterApiKey);
+                    setSimKeysSaveMessage(null);
+                    setShowSimKeysModal(true);
+                  }}
+                  className="text-[11px] font-semibold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 inline-flex items-center gap-1"
+                >
+                  <Key className="w-3 h-3" />
+                  <span>Configurar Chaves</span>
+                </button>
+              </div>
+
               <p className="text-sm text-slate-700 dark:text-slate-200 leading-relaxed">{currentQuestion.explanation}</p>
               {currentQuestion.legalBasis && (
                 <p className="text-xs font-mono text-slate-500 dark:text-slate-400 pt-1">
                   Fundamentação: {currentQuestion.legalBasis}
                 </p>
               )}
+
+              {aiExplainingError[currentQuestion.id] && (
+                <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900 text-xs text-amber-900 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span>{aiExplainingError[currentQuestion.id]}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const current = getClientAiKeys();
+                      setSimGeminiKeyInput(current.geminiApiKey);
+                      setSimGroqKeyInput(current.groqApiKey);
+                      setSimOpenRouterKeyInput(current.openrouterApiKey);
+                      setSimKeysSaveMessage(null);
+                      setShowSimKeysModal(true);
+                    }}
+                    className="px-3 py-1 bg-amber-200 dark:bg-amber-900 hover:bg-amber-300 text-amber-950 dark:text-amber-100 rounded-lg font-semibold inline-flex items-center gap-1 w-fit"
+                  >
+                    <Key className="w-3 h-3" />
+                    <span>Configurar Chaves</span>
+                  </button>
+                </div>
+              )}
+
               {aiExplanations[currentQuestion.id] && (
-                <div className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-800 text-xs sm:text-sm text-slate-800 dark:text-slate-100 whitespace-pre-wrap leading-relaxed">
-                  {aiExplanations[currentQuestion.id]}
+                <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-800 shadow-xs space-y-3">
+                  <div className="flex items-center justify-between text-xs text-emerald-800 dark:text-emerald-400 font-semibold border-b border-emerald-100 dark:border-emerald-900/50 pb-2">
+                    <span className="flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-[#146C43] dark:text-emerald-400" />
+                      <span>Explicação Detalhada do Professor IA (CETAP)</span>
+                    </span>
+                    <button
+                      type="button"
+                      disabled={aiExplainingId === currentQuestion.id}
+                      onClick={() => void handleExplainCurrentWithAi(currentQuestion, aiEngineChoice)}
+                      className="text-[11px] text-slate-500 hover:text-emerald-700 dark:hover:text-emerald-300 underline"
+                    >
+                      Regerar
+                    </button>
+                  </div>
+                  <div className="text-xs sm:text-sm text-slate-800 dark:text-slate-100 whitespace-pre-wrap leading-relaxed">
+                    {aiExplanations[currentQuestion.id]}
+                  </div>
+                  <div className="pt-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                    <span className="font-medium text-emerald-700 dark:text-emerald-400">
+                      {aiEngineLabels[currentQuestion.id] || 'Respondido por Gemini 2.5 Flash'}
+                    </span>
+                    <span className="text-[10px] text-slate-400">
+                      Salvo no cache do navegador
+                    </span>
+                  </div>
                 </div>
               )}
             </div>
@@ -1938,6 +2096,139 @@ export function SimuladosView({
           initialSearchQuery={readerTarget.query}
           onClose={() => setReaderTarget(null)}
         />
+      )}
+
+      {/* Modal: Configurar Chaves de IA (Simulados) */}
+      {showSimKeysModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs"
+        >
+          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/80 dark:bg-slate-800/50">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-[#0B3321] dark:text-emerald-300 flex items-center justify-center font-bold">
+                  <Key className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-display text-sm font-bold text-slate-900 dark:text-white">
+                    Configurar Chaves de IA (Professor CETAP)
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Salvas com segurança no seu navegador (localStorage)
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSimKeysModal(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"
+                aria-label="Fechar"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Form */}
+            <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
+              <div className="p-3 rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800/80 text-xs text-emerald-900 dark:text-emerald-200 flex items-start gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-700 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <p>
+                  As chaves abaixo garantem que o <strong>Professor IA</strong> e as <strong>IAs de Reserva</strong> funcionem diretamente no seu dispositivo sem falhas por cota gratuita.
+                </p>
+              </div>
+
+              {simKeysSaveMessage && (
+                <div className="p-3 rounded-xl bg-emerald-100 dark:bg-emerald-900/60 border border-emerald-300 dark:border-emerald-700 text-xs text-emerald-900 dark:text-emerald-100 flex items-center gap-2">
+                  <Check className="w-4 h-4 text-emerald-700 dark:text-emerald-300 shrink-0" />
+                  <span>{simKeysSaveMessage}</span>
+                </div>
+              )}
+
+              {/* Field 1: Gemini */}
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                  <span>1. Chave Google Gemini (gemini-2.5-flash)</span>
+                  <span className="text-[10px] text-emerald-700 dark:text-emerald-400 font-semibold">Padrão</span>
+                </label>
+                <input
+                  type="password"
+                  value={simGeminiKeyInput}
+                  onChange={(e) => setSimGeminiKeyInput(e.target.value)}
+                  placeholder="AIzaSy..."
+                  autoComplete="off"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <p className="text-[10px] text-slate-500">Salva como gemini_api_key no localStorage</p>
+              </div>
+
+              {/* Field 2: Groq */}
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                  <span>2. Chave Groq (llama-3.3-70b-versatile)</span>
+                  <span className="text-[10px] text-slate-500 font-semibold">Reserva 1</span>
+                </label>
+                <input
+                  type="password"
+                  value={simGroqKeyInput}
+                  onChange={(e) => setSimGroqKeyInput(e.target.value)}
+                  placeholder="gsk_..."
+                  autoComplete="off"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <p className="text-[10px] text-slate-500">Salva como groq_api_key no localStorage</p>
+              </div>
+
+              {/* Field 3: OpenRouter */}
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                  <span>3. Chave OpenRouter (meta-llama/llama-3.3-70b-instruct:free)</span>
+                  <span className="text-[10px] text-slate-500 font-semibold">Reserva 2</span>
+                </label>
+                <input
+                  type="password"
+                  value={simOpenRouterKeyInput}
+                  onChange={(e) => setSimOpenRouterKeyInput(e.target.value)}
+                  placeholder="sk-or-v1-..."
+                  autoComplete="off"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <p className="text-[10px] text-slate-500">Salva como openrouter_api_key no localStorage</p>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowSimKeysModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+              >
+                Fechar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  saveClientAiKeys({
+                    geminiApiKey: simGeminiKeyInput,
+                    groqApiKey: simGroqKeyInput,
+                    openrouterApiKey: simOpenRouterKeyInput,
+                  });
+                  setSimKeysSaveMessage('Chaves salvas com sucesso!');
+                  setTimeout(() => {
+                    setSimKeysSaveMessage(null);
+                  }, 3000);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[#0B3321] hover:bg-emerald-900 shadow-xs inline-flex items-center gap-1.5"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Salvar Chaves</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -135,6 +135,12 @@ describe('Firestore Security Rules Structural Invariants', () => {
     const longEmail = `${'a'.repeat(140)}@example.com`;
     expect(clientFormula(longEmail).length).toBe(128);
   });
+
+  it('supports LGPD privacyAcceptedAt/privacyVersion fields and owner delete on /users/{userId}', () => {
+    expect(firestoreRules).toContain("'privacyAcceptedAt'");
+    expect(firestoreRules).toContain("'privacyVersion'");
+    expect(firestoreRules).toMatch(/match \/users\/\{userId\}[\s\S]*allow delete: if isValidId\(userId\) && isSignedIn\(\) && isOwner\(userId\);/);
+  });
 });
 
 describe('Cloud Storage Security Rules Hardening', () => {
